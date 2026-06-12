@@ -422,19 +422,13 @@ async function processConfirmedPayment(txData, client) {
     storeState.addTipUsed(order.bglAmount);
     storeState.deductStock(order.bglAmount);
 
-    // Take screenshot — tipUser already saved one at /tmp/gamblit_5_result_*.png
-    // Find the most recent result screenshot
+    // Take screenshot after tip
     let screenshotPath = null;
     try {
-      const files = fs.readdirSync('/tmp').filter(f => f.startsWith('gamblit_5_result_')).sort().reverse();
-      if (files.length > 0) screenshotPath = `/tmp/${files[0]}`;
-      if (!screenshotPath) {
-        // Take a fresh screenshot of the current page state
-        screenshotPath = `/tmp/tip_result_${orderId}_${Date.now()}.png`;
-        await gamblit._getPageForScreenshot(process.env.GAMBLIT_URL || 'https://gamblit.net')
-          .then(p => p.screenshot({ path: screenshotPath }))
-          .catch(() => { screenshotPath = null; });
-      }
+      screenshotPath = `/tmp/tip_result_${orderId}_${Date.now()}.png`;
+      const page = await gamblit._getPageForScreenshot(process.env.GAMBLIT_URL || 'https://gamblit.net');
+      await page.screenshot({ path: screenshotPath });
+      console.log('[OrderProcessor] Screenshot saved:', screenshotPath);
     } catch (ssErr) {
       console.warn('[OrderProcessor] Screenshot failed:', ssErr.message);
       screenshotPath = null;
