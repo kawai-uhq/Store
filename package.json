@@ -1,0 +1,22 @@
+{
+  "name": "autostore-bot",
+  "version": "1.0.0",
+  "description": "Automatic BGL Store Discord Bot with Litecoin payments",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "axios": "^1.7.2",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.3",
+    "puppeteer": "^22.12.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
