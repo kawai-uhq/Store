@@ -80,14 +80,30 @@ client.once(Events.ClientReady, async (c) => {
     console.warn('⚠️  LTC_WALLET_ADDRESS not set — payment monitoring disabled');
   } else {
     ltcMonitor.startMonitor(walletAddress, async (txData) => {
+      // Only process txs that were submitted via TX ID button
+      // (orders that have txHash set via handleTxModalSubmit)
+      const state = storeState.get();
+      const matchedOrder = Object.values(state.pendingOrders).find(
+        o => o.txHash === txData.txHash && o.txSubmitted
+      );
+
+      if (!matchedOrder) {
+        // Log unmatched but don't spam — only for confirmed txs
+        if (!txData.pending && !storeState.isTxSeen(txData.txHash, '_unmatched_logged')) {
+          storeState.markTxSeen(txData.txHash, '_unmatched_logged');
+          console.log(`[LTCMonitor] TX ${txData.txHash.slice(0,16)}... not linked to any order — user needs to submit TX ID`);
+        }
+        return;
+      }
+
       if (txData.pending) {
-        console.log(`[LTCMonitor] 🔍 Unconfirmed tx: ${txData.ltcAmount} LTC — waiting for confirmation`);
+        console.log(`[LTCMonitor] 🔍 Unconfirmed tx for order ${matchedOrder.orderId}`);
       } else {
-        console.log(`[LTCMonitor] ✅ Confirmed tx: ${txData.ltcAmount} LTC (${txData.confirmations} confirmations)`);
+        console.log(`[LTCMonitor] ✅ Confirmed tx: ${txData.ltcAmount} LTC (${txData.confirmations} confs) for order ${matchedOrder.orderId}`);
       }
       await processConfirmedPayment(txData, client);
     });
-    console.log('✅ LTC monitor started (polling every 30s, ignoring pre-startup txs)');
+    console.log('✅ LTC monitor started — watching for TX ID submissions');
   }
 
   // ── Cron jobs ───────────────────────────────────────────────────────────
