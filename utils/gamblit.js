@@ -173,27 +173,58 @@ async function tipUser(growId, bglAmount) {
   await inputs[0].type(String(growId), { delay: 50 });
   console.log('[Gamblit] Filled username:', growId);
 
-  // Clear amount field and type WL amount
-  await inputs[1].click({ clickCount: 3 });
+  // Fill amount — use React's own onChange by focusing and typing char by char
+  await inputs[1].focus();
+  await sleep(100);
+  // Select all and delete
   await page.keyboard.down('Control');
   await page.keyboard.press('a');
   await page.keyboard.up('Control');
-  await page.keyboard.press('Backspace');
+  await page.keyboard.press('Delete');
   await sleep(200);
-  // Verify field is empty
-  const currentVal = await inputs[1].evaluate(el => el.value);
-  console.log('[Gamblit] Amount field before typing:', currentVal);
-  await inputs[1].type(String(wlAmount), { delay: 80 });
-  await sleep(200);
-  const newVal = await inputs[1].evaluate(el => el.value);
-  console.log('[Gamblit] Amount field after typing:', newVal, '(expected:', wlAmount, ')');
-  // Trigger React state update
-  await inputs[1].evaluate((el, val) => {
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    nativeInputValueSetter.call(el, val);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }, String(wlAmount));
+  // Also clear via backspace repeatedly
+  for (let i = 0; i < 15; i++) await page.keyboard.press('Backspace');
+  await sleep(100);
+
+  const beforeVal = await inputs[1].evaluate(el => el.value);
+  console.log('[Gamblit] Amount field before typing:', JSON.stringify(beforeVal));
+
+  // Type each digit one by one with delays so React captures each keystroke
+  const wlStr = String(wlAmount);
+  for (const ch of wlStr) {
+    await page.keyboard.press(ch);
+    await sleep(50);
+  }
+  await sleep(300);
+
+  const afterVal = await inputs[1].evaluate(el => el.value);
+  console.log('[Gamblit] Amount field after typing:', afterVal, '(expected:', wlStr, ')');
+
+  if (afterVal !== wlStr) {
+    // Last resort: use evaluate to set React state directly via fiber
+    await inputs[1].evaluate((el, val) => {
+      // Find React fiber and update state
+      const key = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+      if (key) {
+        const fiber = el[key];
+        const handler = fiber?.memoizedProps?.onChange;
+        if (handler) {
+          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+          nativeSetter.call(el, val);
+          handler({ target: el, currentTarget: el });
+        }
+      }
+      // Also try native setter + events
+      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      nativeSetter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, wlStr);
+    await sleep(200);
+    const finalVal = await inputs[1].evaluate(el => el.value);
+    console.log('[Gamblit] Amount field after React fix:', finalVal);
+  }
+
   console.log(`[Gamblit] Filled tip amount: ${wlAmount} WL (${bglAmount} BGLs)`);
 
   await sleep(500);
