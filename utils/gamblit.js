@@ -173,15 +173,27 @@ async function tipUser(growId, bglAmount) {
   await inputs[0].type(String(growId), { delay: 50 });
   console.log('[Gamblit] Filled username:', growId);
 
-  // Clear the amount field completely before typing
+  // Clear amount field and type WL amount
   await inputs[1].click({ clickCount: 3 });
-  await inputs[1].evaluate(el => el.value = '');
-  await inputs[1].type(String(wlAmount), { delay: 50 });
-  // Trigger input event so React/Vue picks up the change
-  await inputs[1].evaluate(el => {
+  await page.keyboard.down('Control');
+  await page.keyboard.press('a');
+  await page.keyboard.up('Control');
+  await page.keyboard.press('Backspace');
+  await sleep(200);
+  // Verify field is empty
+  const currentVal = await inputs[1].evaluate(el => el.value);
+  console.log('[Gamblit] Amount field before typing:', currentVal);
+  await inputs[1].type(String(wlAmount), { delay: 80 });
+  await sleep(200);
+  const newVal = await inputs[1].evaluate(el => el.value);
+  console.log('[Gamblit] Amount field after typing:', newVal, '(expected:', wlAmount, ')');
+  // Trigger React state update
+  await inputs[1].evaluate((el, val) => {
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    nativeInputValueSetter.call(el, val);
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-  });
+  }, String(wlAmount));
   console.log(`[Gamblit] Filled tip amount: ${wlAmount} WL (${bglAmount} BGLs)`);
 
   await sleep(500);
