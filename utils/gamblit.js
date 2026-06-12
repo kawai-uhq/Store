@@ -173,57 +173,31 @@ async function tipUser(growId, bglAmount) {
   await inputs[0].type(String(growId), { delay: 50 });
   console.log('[Gamblit] Filled username:', growId);
 
-  // Fill amount — use React's own onChange by focusing and typing char by char
-  await inputs[1].focus();
-  await sleep(100);
-  // Select all and delete
-  await page.keyboard.down('Control');
-  await page.keyboard.press('a');
-  await page.keyboard.up('Control');
-  await page.keyboard.press('Delete');
-  await sleep(200);
-  // Also clear via backspace repeatedly
-  for (let i = 0; i < 15; i++) await page.keyboard.press('Backspace');
-  await sleep(100);
-
-  const beforeVal = await inputs[1].evaluate(el => el.value);
-  console.log('[Gamblit] Amount field before typing:', JSON.stringify(beforeVal));
-
-  // Type each digit one by one with delays so React captures each keystroke
+  // The amount input is React-controlled with initial value "1"
+  // Must call React's onChange handler directly via fiber to update state
   const wlStr = String(wlAmount);
-  for (const ch of wlStr) {
-    await page.keyboard.press(ch);
-    await sleep(50);
-  }
+  const reactUpdateResult = await inputs[1].evaluate((el, val) => {
+    // Find React fiber key
+    const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+    if (!fiberKey) return 'no-fiber';
+
+    const fiber = el[fiberKey];
+    const onChange = fiber?.memoizedProps?.onChange;
+    if (!onChange) return 'no-onChange';
+
+    // Call onChange with a synthetic event containing the new value
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    nativeSetter.call(el, val);
+    onChange({ target: el, currentTarget: el, type: 'change' });
+    return 'called-onChange:' + el.value;
+  }, wlStr);
+
+  console.log('[Gamblit] React onChange result:', reactUpdateResult);
   await sleep(300);
 
-  const afterVal = await inputs[1].evaluate(el => el.value);
-  console.log('[Gamblit] Amount field after typing:', afterVal, '(expected:', wlStr, ')');
-
-  if (afterVal !== wlStr) {
-    // Last resort: use evaluate to set React state directly via fiber
-    await inputs[1].evaluate((el, val) => {
-      // Find React fiber and update state
-      const key = Object.keys(el).find(k => k.startsWith('__reactFiber'));
-      if (key) {
-        const fiber = el[key];
-        const handler = fiber?.memoizedProps?.onChange;
-        if (handler) {
-          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-          nativeSetter.call(el, val);
-          handler({ target: el, currentTarget: el });
-        }
-      }
-      // Also try native setter + events
-      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      nativeSetter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, wlStr);
-    await sleep(200);
-    const finalVal = await inputs[1].evaluate(el => el.value);
-    console.log('[Gamblit] Amount field after React fix:', finalVal);
-  }
+  // Verify the value took
+  const verifyVal = await inputs[1].evaluate(el => el.value);
+  console.log('[Gamblit] Amount field value:', verifyVal, '(expected:', wlStr, ')');
 
   console.log(`[Gamblit] Filled tip amount: ${wlAmount} WL (${bglAmount} BGLs)`);
 
@@ -233,25 +207,24 @@ async function tipUser(growId, bglAmount) {
   // ── Step 3: Click "Send tip" button ──────────────────────────────────────
   const submitted = await page.evaluate(() => {
     const btns = [...document.querySelectorAll('button:not([disabled])')];
-    // Must match exactly "Send tip" — avoid other buttons
     const btn = btns.find(b => b.textContent.trim() === 'Send tip');
     if (btn) { btn.click(); return btn.textContent.trim(); }
     return null;
   });
 
   if (!submitted) {
-    // Coordinate fallback — "Send tip" green button at ~x=640, y=508
-    await page.mouse.click(640, 508);
+    await page.mouse.click(640, 484);
     console.log('[Gamblit] Clicked Send tip by coordinate');
   } else {
     console.log('[Gamblit] Clicked:', submitted);
   }
 
-  await sleep(4000);
-  // Save with timestamp so orderProcessor can find the most recent one
+  // Wait for success toast to appear, then screenshot WITH the toast visible
+  await sleep(3000);
   const resultScreenshotPath = `/tmp/gamblit_5_result_${Date.now()}.png`;
   await page.screenshot({ path: resultScreenshotPath }).catch(() => {});
   console.log('[Gamblit] Result screenshot saved:', resultScreenshotPath);
+  await sleep(1000);
 
   // ── Step 4: Check result ──────────────────────────────────────────────────
   const result = await page.evaluate(() => {
@@ -272,20 +245,7 @@ async function tipUser(growId, bglAmount) {
     throw new Error('Gamblit error: ' + result.toasts.find(t => /error|fail/i.test(t)));
   }
 
-  // ── Step 5: Close the modal ───────────────────────────────────────────────
-  await page.evaluate(() => {
-    // Click the X button to close the modal
-    const closeBtn = document.querySelector('button[class*="close" i], button[aria-label*="close" i]');
-    if (closeBtn) { closeBtn.click(); return; }
-    // Find X button by content
-    const btns = [...document.querySelectorAll('button')];
-    const x = btns.find(b => b.textContent.trim() === '×' || b.textContent.trim() === 'x' || b.textContent.trim() === '✕');
-    if (x) { x.click(); return; }
-    // Coordinate fallback — X is at top right of modal ~x=816, y=254
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  });
-
-  // Also try pressing Escape
+  // ── Step 5: Close the modal via Escape ──────────────────────────────────
   await page.keyboard.press('Escape');
   await sleep(500);
 
