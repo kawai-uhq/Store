@@ -434,33 +434,29 @@ async function processConfirmedPayment(txData, client) {
       screenshotPath = null;
     }
 
-    // Notify user with screenshot
+    // Notify user with completion message + screenshot as separate message
     try {
       const user = await client.users.fetch(order.userId);
-      const dmPayload = buildOrderCompleted({
+
+      // Send the completion embed first
+      await user.send(buildOrderCompleted({
         orderId,
         bglAmount: order.bglAmount,
         gamblitUsername: order.gamblitUsername,
         txHash,
-      });
+      }));
 
+      // Send screenshot as a separate plain message
       if (screenshotPath && fs.existsSync(screenshotPath)) {
-        dmPayload.files = [new AttachmentBuilder(fs.readFileSync(screenshotPath), { name: 'tip_confirmation.png' })];
         console.log('[OrderProcessor] Attaching screenshot:', screenshotPath);
+        await user.send({
+          content: '📸 **Tip confirmation screenshot:**',
+          files: [{ attachment: screenshotPath, name: 'tip_confirmation.png' }],
+        });
       } else {
-        console.warn('[OrderProcessor] No screenshot found to attach');
+        console.warn('[OrderProcessor] No screenshot to attach');
       }
 
-      // Add overpayment notice if applicable
-      if (overpaid > 0.00005) {
-        const ltcRates = await ltcMonitor.getLtcUsdRate().catch(() => ({ usd: 80, eur: 74 }));
-        const extraUsd = (overpaid * ltcRates.usd).toFixed(2);
-        dmPayload.content = (dmPayload.content || '') +
-          `
-
-💰 **Note:** You overpaid by \`${overpaid.toFixed(6)}\` LTC (~$${extraUsd}). The extra amount stays in our wallet — no refunds for overpayments.`;
-      }
-      await user.send(dmPayload);
       console.log('[OrderProcessor] DM sent to user');
     } catch (dmErr) {
       console.warn('[OrderProcessor] Could not DM user:', dmErr.message);
