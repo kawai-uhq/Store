@@ -12,21 +12,51 @@ const BC_BASE = 'https://api.blockcypher.com/v1/ltc/main';
 
 let ltcUsdRate = null;
 let rateLastFetched = 0;
+const RATE_TTL = 15 * 60 * 1000; // 15 min — comfortably longer than the 5-min embed cron
+
+async function fetchFromCoinGecko() {
+  const headers = {};
+  if (process.env.COINGECKO_API_KEY) headers['x-cg-demo-api-key'] = process.env.COINGECKO_API_KEY;
+  const res = await axios.get(
+    'https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd,eur',
+    { timeout: 10000, headers }
+  );
+  return { usd: res.data.litecoin.usd, eur: res.data.litecoin.eur };
+}
+
+async function fetchFromKraken() {
+  const res = await axios.get('https://api.kraken.com/0/public/Ticker?pair=LTCUSD,LTCEUR', { timeout: 10000 });
+  const result = res.data?.result || {};
+  let usd, eur;
+  for (const [key, val] of Object.entries(result)) {
+    const last = parseFloat(val?.c?.[0]);
+    if (!last) continue;
+    if (key.includes('USD')) usd = last;
+    if (key.includes('EUR')) eur = last;
+  }
+  if (!usd || !eur) throw new Error('Kraken returned no LTC price');
+  return { usd, eur };
+}
 
 async function getLtcUsdRate() {
   const now = Date.now();
-  if (ltcUsdRate && now - rateLastFetched < 5 * 60 * 1000) return ltcUsdRate;
+  if (ltcUsdRate && now - rateLastFetched < RATE_TTL) return ltcUsdRate;
+
   try {
-    const res = await axios.get(
-      'https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd,eur',
-      { timeout: 10000 }
-    );
-    ltcUsdRate = { usd: res.data.litecoin.usd, eur: res.data.litecoin.eur };
+    ltcUsdRate = await fetchFromCoinGecko();
     rateLastFetched = now;
     return ltcUsdRate;
   } catch (e) {
-    console.error('[LTCMonitor] Failed to fetch LTC rate:', e.message);
-    return ltcUsdRate || { usd: 80, eur: 74 };
+    const code = e.response?.status || e.message;
+    console.warn(`[LTCMonitor] CoinGecko failed (${code}) — trying Kraken`);
+    try {
+      ltcUsdRate = await fetchFromKraken();
+      rateLastFetched = now;
+      return ltcUsdRate;
+    } catch (e2) {
+      console.error('[LTCMonitor] Kraken also failed:', e2.message);
+      return ltcUsdRate || { usd: 80, eur: 74 }; // last-known, else placeholder
+    }
   }
 }
 
