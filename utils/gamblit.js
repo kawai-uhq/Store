@@ -97,10 +97,22 @@ async function getBalanceBgl() {
   });
 }
 
+// Public: tip a BGL amount (converts BGL -> WL using WL_PER_BGL).
 async function tipUser(growId, bglAmount) {
-  return withLock(async () => {
-    const wlAmount = bglAmount * WL_PER_BGL;
-    console.log(`[Gamblit] Tipping ${bglAmount} BGLs = ${wlAmount} WL → ${growId}`);
+  return withLock(() => _tipFlow(growId, String(bglAmount * WL_PER_BGL),
+    `${bglAmount} BGLs = ${bglAmount * WL_PER_BGL} WL`));
+}
+
+// Public: tip a RAW amount in whatever unit the field expects (no conversion).
+// Use this to verify the unit — tip a small known number and watch the balance.
+async function tipRaw(growId, rawAmount) {
+  return withLock(() => _tipFlow(growId, String(rawAmount), `${rawAmount} (raw)`));
+}
+
+// Internal UI flow — call only inside withLock.
+async function _tipFlow(growId, amountStr, label) {
+  {
+    console.log(`[Gamblit] Tipping ${label} → ${growId}`);
     const page = await getPage();
 
     await page.goto(GAMBLIT_URL, { waitUntil: 'networkidle2', timeout: 30000 });
@@ -143,7 +155,7 @@ async function tipUser(growId, bglAmount) {
       setter.call(el, val);
       el.dispatchEvent(new Event('input', { bubbles: true }));
       if (onChange) onChange({ target: el, currentTarget: el, type: 'change' });
-    }, String(wlAmount));
+    }, amountStr);
     await sleep(400);
 
     const submitted = await page.evaluate(() => {
@@ -168,9 +180,9 @@ async function tipUser(growId, bglAmount) {
     }
 
     await page.keyboard.press('Escape').catch(() => {});
-    console.log(`[Gamblit] ✅ ${bglAmount} BGLs (${wlAmount} WL) → ${growId}`);
+    console.log(`[Gamblit] ✅ Tipped ${label} → ${growId}`);
     return { success: true, screenshot: resultPath };
-  });
+  }
 }
 
 async function verifyToken() {
@@ -199,4 +211,4 @@ async function closeBrowser() {
   if (browser) { await browser.close().catch(() => {}); browser = null; }
 }
 
-module.exports = { tipUser, verifyToken, getBalanceBgl, _getPageForScreenshot, closeBrowser, DL_PER_BGL, WL_PER_BGL };
+module.exports = { tipUser, tipRaw, verifyToken, getBalanceBgl, _getPageForScreenshot, closeBrowser, DL_PER_BGL, WL_PER_BGL };
