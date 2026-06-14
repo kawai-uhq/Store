@@ -54,9 +54,13 @@ client.once(Events.ClientReady, async (c) => {
     try {
       const bal = await gamblit.getBalanceBgl();
       if (bal && bal.bgl !== null) {
-        storeState.setStock(bal.bgl);
-        console.log(`[BalanceSync] Stock = ${bal.bgl} BGLs (${bal.dl} DL)`);
-        await refreshStoreMessage(client).catch(() => {});
+        if (storeState.getConfig().autoSyncStock) {
+          storeState.setStock(bal.bgl);
+          console.log(`[BalanceSync] Stock = ${bal.bgl} BGLs (${bal.dl} DL)`);
+          await refreshStoreMessage(client).catch(() => {});
+        } else {
+          console.log(`[BalanceSync] autoSyncStock off — keeping manual stock. Live balance: ${bal.bgl} BGLs`);
+        }
       }
     } catch (e) { console.error('[BalanceSync] Failed:', e.message); }
   }
