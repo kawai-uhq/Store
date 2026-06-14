@@ -48,7 +48,8 @@ async function buildStoreMessage() {
     new ButtonBuilder().setCustomId('store_buy').setLabel('Buy').setEmoji('🛒').setStyle(ButtonStyle.Success).setDisabled(!canBuy),
     new ButtonBuilder().setCustomId('store_stock').setLabel('Stock Info').setEmoji('📦').setStyle(ButtonStyle.Secondary)
   );
-  return { components: [container, row], flags: CV2_FLAG };
+  container.addActionRowComponents(row);
+  return { components: [container], flags: CV2_FLAG };
 }
 
 // ─── ORDER CONFIRMATION (address + copy + QR) ─────────────────────────────────
@@ -148,7 +149,7 @@ async function buildStockInfo() {
       `📦 **Total Stock:** ${state.stockBgls.toLocaleString()} BGLs\n⏳ **On Hold:** ${state.onHoldBgls.toLocaleString()} BGLs\n` +
       `✅ **Available:** ${available.toLocaleString()} BGLs\n💵 **Price:** €${state.bglPriceEur.toFixed(2)} / $${state.bglPriceUsd.toFixed(2)} per BGL` + orderLines
     ));
-  return { components: [container], flags: CV2_FLAG };
+  return { components: [container], flags: CV2_FLAG | MessageFlags.Ephemeral };
 }
 
 module.exports = {
