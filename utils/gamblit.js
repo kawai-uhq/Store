@@ -143,30 +143,45 @@ async function _tipFlow(growId, amountStr, label) {
       throw new Error('Tip modal inputs not found');
     }
 
-    await inputs[0].click({ clickCount: 3 });
-    await inputs[0].type(String(growId), { delay: 50 });
+    // Fill mirrors the proven probe sequence. CRITICAL: the amount CurrencyInput
+    // commits on BLUR, so onChange (sets the amount) must FLUSH before onBlur fires
+    // — otherwise blur commits the stale default 1. We split them across ticks.
+    // Step 1: username (commits on onChange) + amount value + amount onChange.
+    await page.evaluate((gid, amt) => {
+      const propsOf = (el) => { const k = Object.keys(el).find((x) => x.startsWith('__reactProps')); return k ? el[k] : null; };
+      const setNative = (el, val) => Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, val);
+      const ev = (el, type) => ({ target: el, currentTarget: el, type, bubbles: true, preventDefault() {}, stopPropagation() {} });
+      const inputs = [...document.querySelectorAll('input')];
+      const userEl = inputs[0], amountEl = inputs[1];
+      const up = propsOf(userEl);
+      setNative(userEl, String(gid));
+      if (up && typeof up.onChange === 'function') up.onChange(ev(userEl, 'change'));
+      userEl.dispatchEvent(new Event('input', { bubbles: true }));
+      const ap = propsOf(amountEl);
+      setNative(amountEl, String(amt));
+      if (ap && typeof ap.onChange === 'function') ap.onChange(ev(amountEl, 'change'));
+      amountEl.dispatchEvent(new Event('input', { bubbles: true }));
+    }, growId, amountStr);
 
-    // The amount field is a CurrencyInput that only COMMITS on blur (confirmed via
-    // probe — onChange alone left the modal's amount state at its default 1).
-    // Set value -> fire its real onChange -> fire its real onBlur, then verify
-    // against React state (digits only, since CurrencyInput may format the value).
-    const amountInput = inputs[1];
-    await amountInput.evaluate((el, val) => {
-      const pk = Object.keys(el).find((k) => k.startsWith('__reactProps'));
-      const props = pk ? el[pk] : null;
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      const ev = (type) => ({ target: el, currentTarget: el, type, bubbles: true, preventDefault() {}, stopPropagation() {} });
-      if (props && typeof props.onChange === 'function') props.onChange(ev('change'));
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      if (props && typeof props.onBlur === 'function') props.onBlur(ev('blur'));
-      el.dispatchEvent(new Event('blur', { bubbles: true }));
-    }, amountStr);
+    await sleep(350); // let React flush the amount onChange before blur-committing
+
+    // Step 2: blur-commit the amount.
+    await page.evaluate(() => {
+      const propsOf = (el) => { const k = Object.keys(el).find((x) => x.startsWith('__reactProps')); return k ? el[k] : null; };
+      const amountEl = [...document.querySelectorAll('input')][1];
+      const ap = propsOf(amountEl);
+      const e = { target: amountEl, currentTarget: amountEl, type: 'blur', bubbles: true, preventDefault() {}, stopPropagation() {} };
+      if (ap && typeof ap.onBlur === 'function') ap.onBlur(e);
+      amountEl.dispatchEvent(new Event('blur', { bubbles: true }));
+    });
+
     await sleep(400);
 
-    const committed = await amountInput.evaluate((el) => {
-      const pk = Object.keys(el).find((k) => k.startsWith('__reactProps'));
-      return pk ? String(el[pk].value) : String(el.value);
+    // Verify the committed amount in React state (digits only — CurrencyInput may format).
+    const committed = await page.evaluate(() => {
+      const amountEl = [...document.querySelectorAll('input')][1];
+      const k = Object.keys(amountEl).find((x) => x.startsWith('__reactProps'));
+      return k ? String(amountEl[k].value) : String(amountEl.value);
     });
     const want = amountStr.replace(/\D/g, '');
     const got = (committed || '').replace(/\D/g, '');
