@@ -1,6 +1,4 @@
-// utils/orderModal.js
-// Buy modal for the forwarding-address flow. (TX-ID modal removed — payments are
-// now detected automatically on each order's unique address.)
+// utils/orderModal.js — Buy modal (username + USD) and TX-ID submission modal.
 
 const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
 
@@ -16,19 +14,35 @@ function buildBuyModal() {
     .setMinLength(2)
     .setMaxLength(50);
 
-  const ltcAmountInput = new TextInputBuilder()
-    .setCustomId('ltc_amount')
-    .setLabel('Estimated LTC you will send')
+  const usdInput = new TextInputBuilder()
+    .setCustomId('usd_amount')
+    .setLabel('Amount in USD you will send')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('e.g. 0.05 — used only for the quote, send any amount')
+    .setPlaceholder('e.g. 5')
     .setRequired(true)
-    .setMaxLength(20);
+    .setMaxLength(12);
 
   modal.addComponents(
     new ActionRowBuilder().addComponents(usernameInput),
-    new ActionRowBuilder().addComponents(ltcAmountInput)
+    new ActionRowBuilder().addComponents(usdInput)
   );
   return modal;
 }
 
-module.exports = { buildBuyModal };
+function buildTxModal(orderId) {
+  const modal = new ModalBuilder().setCustomId(`modal_txid_${orderId}`).setTitle('🔎 Check Your Payment');
+
+  const txInput = new TextInputBuilder()
+    .setCustomId('tx_hash')
+    .setLabel('Litecoin Transaction ID (hash)')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('The 64-character TX hash from your wallet')
+    .setRequired(true)
+    .setMinLength(60)
+    .setMaxLength(80);
+
+  modal.addComponents(new ActionRowBuilder().addComponents(txInput));
+  return modal;
+}
+
+module.exports = { buildBuyModal, buildTxModal };
