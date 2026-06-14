@@ -1,9 +1,8 @@
 // utils/ltcMonitor.js
-// Chain-read helpers for the forwarding-address model.
-//  - getLtcUsdRate(): live LTC price (CoinGecko), 5-min cache
-//  - getAddressDeposit(addr): how much LTC a forwarding address has received + confirmations
-//  - lookupTx(hash, addr): kept for manual checks / admin tooling
-// The per-order polling loop now lives in orderProcessor.startOrderPoller().
+// Chain-read helpers for the UNIQUE-AMOUNT model (single static address, match by amount).
+//  - getLtcUsdRate(): live LTC price (CoinGecko + Kraken fallback), 15-min cache
+//  - getAddressIncomingTxs(addr): incoming payments to your wallet (value + confirmations)
+//  - lookupTx(hash, addr): manual/admin tx check
 
 const axios = require('axios');
 
@@ -12,7 +11,7 @@ const BC_BASE = 'https://api.blockcypher.com/v1/ltc/main';
 
 let ltcUsdRate = null;
 let rateLastFetched = 0;
-const RATE_TTL = 15 * 60 * 1000; // 15 min — comfortably longer than the 5-min embed cron
+const RATE_TTL = 15 * 60 * 1000;
 
 async function fetchFromCoinGecko() {
   const headers = {};
@@ -41,21 +40,19 @@ async function fetchFromKraken() {
 async function getLtcUsdRate() {
   const now = Date.now();
   if (ltcUsdRate && now - rateLastFetched < RATE_TTL) return ltcUsdRate;
-
   try {
     ltcUsdRate = await fetchFromCoinGecko();
     rateLastFetched = now;
     return ltcUsdRate;
   } catch (e) {
-    const code = e.response?.status || e.message;
-    console.warn(`[LTCMonitor] CoinGecko failed (${code}) — trying Kraken`);
+    console.warn(`[LTCMonitor] CoinGecko failed (${e.response?.status || e.message}) — trying Kraken`);
     try {
       ltcUsdRate = await fetchFromKraken();
       rateLastFetched = now;
       return ltcUsdRate;
     } catch (e2) {
       console.error('[LTCMonitor] Kraken also failed:', e2.message);
-      return ltcUsdRate || { usd: 80, eur: 74 }; // last-known, else placeholder
+      return ltcUsdRate || { usd: 80, eur: 74 };
     }
   }
 }
@@ -65,66 +62,39 @@ function bcQuery() {
   return token ? `?token=${token}` : '';
 }
 
-// Total LTC received by a forwarding address + confirmations of the payment.
-// Returns null if nothing has arrived yet.
-// Uses min-confirmations across all incoming parts so we only deliver once the
-// whole payment is settled (handles a buyer sending in two chunks).
-async function getAddressDeposit(address) {
+// Incoming payments to `address`, grouped per tx: [{ txHash, valueSat, confirmations }]
+async function getAddressIncomingTxs(address) {
   try {
     const url = `${BC_BASE}/addrs/${address}${bcQuery()}`;
     const res = await axios.get(url, { timeout: 15000 });
-
-    const refs = [
-      ...(res.data.txrefs || []),
-      ...(res.data.unconfirmed_txrefs || []),
-    ];
-    // Incoming outputs to this address have tx_input_n === -1
-    const incoming = refs.filter((r) => r.tx_input_n === -1);
-    if (incoming.length === 0) return null;
-
-    const totalSat = incoming.reduce((s, r) => s + (r.value || 0), 0);
-    const minConfs = incoming.reduce(
-      (m, r) => Math.min(m, r.confirmations || 0),
-      Infinity
-    );
-    // Newest incoming tx hash (most recent first in BlockCypher ordering)
-    const newest = incoming[0];
-
-    return {
-      txHash: newest.tx_hash,
-      ltcAmount: totalSat / LTC_SATOSHI,
-      confirmations: minConfs === Infinity ? 0 : minConfs,
-      parts: incoming.length,
-    };
-  } catch (e) {
-    if (e.response?.status === 429) {
-      console.warn('[LTCMonitor] Rate limited (429) on address lookup');
-    } else if (e.response?.status !== 404) {
-      console.error('[LTCMonitor] getAddressDeposit error:', e.message);
+    const refs = [...(res.data.txrefs || []), ...(res.data.unconfirmed_txrefs || [])];
+    const byTx = {};
+    for (const r of refs) {
+      if (r.tx_input_n !== -1) continue; // only received outputs
+      const h = r.tx_hash;
+      if (!byTx[h]) byTx[h] = { txHash: h, valueSat: 0, confirmations: r.confirmations || 0 };
+      byTx[h].valueSat += r.value || 0;
+      byTx[h].confirmations = r.confirmations || 0;
     }
-    return null;
+    return Object.values(byTx);
+  } catch (e) {
+    if (e.response?.status === 429) console.warn('[LTCMonitor] Rate limited (429) on address lookup');
+    else console.error('[LTCMonitor] getAddressIncomingTxs error:', e.message);
+    return [];
   }
 }
 
 async function lookupTx(txHash, walletAddress) {
   try {
-    const url = `${BC_BASE}/txs/${txHash}${bcQuery()}`;
-    const res = await axios.get(url, { timeout: 15000 });
+    const res = await axios.get(`${BC_BASE}/txs/${txHash}${bcQuery()}`, { timeout: 15000 });
     const tx = res.data;
-    let receivedSatoshis = 0;
-    for (const output of tx.outputs || []) {
-      if (output.addresses?.includes(walletAddress)) receivedSatoshis += output.value;
-    }
-    return {
-      found: true,
-      ltcAmount: receivedSatoshis / LTC_SATOSHI,
-      confirmations: tx.confirmations || 0,
-      receivedAt: tx.received,
-    };
+    let sat = 0;
+    for (const o of tx.outputs || []) if (o.addresses?.includes(walletAddress)) sat += o.value;
+    return { found: true, ltcAmount: sat / LTC_SATOSHI, confirmations: tx.confirmations || 0 };
   } catch (e) {
     if (e.response?.status === 404) return { found: false, error: 'Transaction not found' };
     return { found: false, error: e.message };
   }
 }
 
-module.exports = { getLtcUsdRate, getAddressDeposit, lookupTx };
+module.exports = { getLtcUsdRate, getAddressIncomingTxs, lookupTx, LTC_SATOSHI };
