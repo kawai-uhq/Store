@@ -2,8 +2,6 @@
 
 const { SlashCommandBuilder, MessageFlags, ChannelType } = require('discord.js');
 const storeState = require('../utils/storeState');
-const forwarding = require('../utils/forwarding');
-const ltcMonitor = require('../utils/ltcMonitor');
 const { buildStoreMessage } = require('../utils/components');
 
 const ADMIN_COMMANDS = [
@@ -24,7 +22,6 @@ const ADMIN_COMMANDS = [
   new SlashCommandBuilder().setName('screenshot').setDescription('Screenshot what Puppeteer sees on Gamblit')
     .addStringOption((o) => o.setName('url').setDescription('URL (default gamblit.net)').setRequired(false)),
   new SlashCommandBuilder().setName('balance').setDescription('Fetch Gamblit balance and sync stock'),
-  new SlashCommandBuilder().setName('testforward').setDescription('Mint a test forwarding address and watch it for a deposit'),
   new SlashCommandBuilder().setName('testtip').setDescription('Send a test tip in RAW units (no BGL conversion)')
     .addStringOption((o) => o.setName('username').setDescription('Gamblit username to tip').setRequired(true))
     .addNumberOption((o) => o.setName('amount').setDescription('Raw amount to type into the tip field (e.g. WL)').setRequired(true).setMinValue(0.0001)),
@@ -92,7 +89,6 @@ async function handleAdminCommand(interaction, client) {
     const orderId = interaction.options.getString('orderid');
     const order = storeState.getOrder(orderId);
     if (!order) return interaction.reply({ content: `❌ Order \`${orderId}\` not found.`, flags: MessageFlags.Ephemeral });
-    if (order.forwardId) await forwarding.deleteForwardingAddress(order.forwardId);
     storeState.cancelOrder(orderId);
     await refreshStoreMessage(client);
     return interaction.reply({ content: `✅ Order \`${orderId}\` cancelled. Released **${order.heldAmount || 0} BGLs** from hold.`, flags: MessageFlags.Ephemeral });
@@ -132,58 +128,6 @@ async function handleAdminCommand(interaction, client) {
     } catch (e) {
       return interaction.editReply({ content: `❌ Balance fetch failed: ${e.message}` });
     }
-  }
-
-  if (cmd === 'testforward') {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const destination = process.env.LTC_WALLET_ADDRESS;
-    if (!destination) return interaction.editReply({ content: '❌ LTC_WALLET_ADDRESS not set.' });
-
-    let fwd;
-    try {
-      fwd = await forwarding.createForwardingAddress(destination);
-    } catch (e) {
-      return interaction.editReply({ content: `❌ Could not mint forwarding address: \`${e.response?.data?.error || e.message}\`` });
-    }
-
-    await interaction.editReply({
-      content:
-        `🧪 **Test forwarding address created**\n` +
-        `Send a tiny amount of LTC to:\n\`\`\`\n${fwd.inputAddress}\n\`\`\`` +
-        `It will auto-forward to \`${destination}\`.\n` +
-        `I'll watch it for ~12 min and update this message when a deposit appears.\n` +
-        `-# forward id: \`${fwd.id}\``,
-    });
-
-    // Watch the address for up to 12 minutes
-    const deadline = Date.now() + 12 * 60 * 1000;
-    const watch = async () => {
-      try {
-        const dep = await ltcMonitor.getAddressDeposit(fwd.inputAddress);
-        if (dep) {
-          await interaction.editReply({
-            content:
-              `🧪✅ **Deposit detected on test address**\n` +
-              `Amount: **${dep.ltcAmount} LTC**\n` +
-              `Confirmations: **${dep.confirmations}**\n` +
-              `TX: \`${dep.txHash}\`\n` +
-              `Forwarding to \`${destination}\` is handled automatically by BlockCypher.`,
-          }).catch(() => {});
-          await forwarding.deleteForwardingAddress(fwd.id);
-          return;
-        }
-      } catch (_) {}
-      if (Date.now() < deadline) {
-        setTimeout(watch, 20000);
-      } else {
-        await interaction.editReply({
-          content: `🧪 Test address \`${fwd.inputAddress}\` — no deposit seen in 12 min. Address deleted. (forward id \`${fwd.id}\`)`,
-        }).catch(() => {});
-        await forwarding.deleteForwardingAddress(fwd.id);
-      }
-    };
-    setTimeout(watch, 20000);
-    return;
   }
 
   if (cmd === 'testtip') {
