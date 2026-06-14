@@ -16,9 +16,11 @@ const sep = () => new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).
 async function buildStoreMessage() {
   const state = storeState.get();
   const available = storeState.getAvailableStock();
+  const open = storeState.isShopOpen();
   const rates = await getLtcUsdRate().catch(() => ({ usd: '?', eur: '?' }));
-  const statusEmoji = available > 0 ? '🟢' : '🔴';
-  const statusText = available > 0 ? 'OPEN' : 'OUT OF STOCK';
+  const canBuy = open && available > 0;
+  const statusEmoji = !open ? '🔴' : (available > 0 ? '🟢' : '🔴');
+  const statusText = !open ? 'CLOSED' : (available > 0 ? 'OPEN' : 'OUT OF STOCK');
   const usdStr = typeof rates.usd === 'number' ? rates.usd.toFixed(2) : rates.usd;
   const holdLine = state.onHoldBgls > 0 ? `\n⏳ **On Hold:** ${state.onHoldBgls.toLocaleString()} BGLs` : '';
 
@@ -43,7 +45,7 @@ async function buildStoreMessage() {
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# 💎 LTC: $${usdStr} — updates every 15 min`));
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('store_buy').setLabel('Buy').setEmoji('🛒').setStyle(ButtonStyle.Success).setDisabled(available <= 0),
+    new ButtonBuilder().setCustomId('store_buy').setLabel('Buy').setEmoji('🛒').setStyle(ButtonStyle.Success).setDisabled(!canBuy),
     new ButtonBuilder().setCustomId('store_stock').setLabel('Stock Info').setEmoji('📦').setStyle(ButtonStyle.Secondary)
   );
   return { components: [container, row], flags: CV2_FLAG };
