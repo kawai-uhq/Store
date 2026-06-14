@@ -1,11 +1,10 @@
 // utils/gamblit.js — Puppeteer-based Gamblit tipping + balance fetch
 //
-// ⚠️ VERIFY THE TIP UNIT BEFORE GOING LIVE ⚠️
-// WL_PER_BGL below assumes the tip field and the on-page balance are in WL
-// (10,000 WL = 1 BGL). The header balance shows a *diamond* icon, which in
-// Growtopia usually means DLs. If the field is actually DLs, every tip is 100x
-// off. Do ONE tiny test tip (e.g. amount that equals 1 of the field's unit) and
-// watch how the balance moves to confirm the unit before trusting this.
+// UNITS: the tip field and the header balance are both in WL (10,000 WL = 1 BGL,
+// 100 WL = 1 DL). An earlier test where "100" tipped only 1 was the amount-fill
+// failing to commit (the field defaults to 1) — NOT a unit mismatch. The amount
+// is now typed like a human and VERIFIED before sending, so it can't silently
+// send the default again.
 
 const puppeteer = require('puppeteer');
 
@@ -42,11 +41,8 @@ async function getPage() {
   });
 
   const page = await browser.newPage();
-  await page.setRequestInterception(true);
-  page.on('request', (req) => {
-    if (['image', 'media', 'font'].includes(req.resourceType())) req.abort();
-    else req.continue();
-  });
+  // Load ALL resources (images, media, fonts). Blocking them left the React UI
+  // partially rendered and misplaced the tip controls.
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36');
   await page.setViewport({ width: 1280, height: 800 });
 
@@ -69,7 +65,7 @@ async function _readBalance() {
   await page.goto(GAMBLIT_URL, { waitUntil: 'networkidle2', timeout: 30000 });
   await sleep(2000);
 
-  const wlBalance = await page.evaluate(() => {
+  const headerNum = await page.evaluate(() => {
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let node;
     while ((node = walker.nextNode())) {
@@ -83,11 +79,13 @@ async function _readBalance() {
     return null;
   });
 
-  if (!wlBalance) {
+  if (!headerNum) {
     await page.screenshot({ path: `/tmp/gamblit_balance_debug_${Date.now()}.png` }).catch(() => {});
     return null;
   }
-  return { wl: wlBalance, dl: wlBalance / 100, bgl: Math.floor((wlBalance / WL_PER_BGL) * 100) / 100 };
+  // Header balance is in WL (the gold icon). Tips are also entered in WL.
+  const wl = headerNum;
+  return { wl, dl: wl / 100, bgl: Math.floor((wl / WL_PER_BGL) * 100) / 100 };
 }
 
 async function getBalanceBgl() {
@@ -148,15 +146,31 @@ async function _tipFlow(growId, amountStr, label) {
     await inputs[0].click({ clickCount: 3 });
     await inputs[0].type(String(growId), { delay: 50 });
 
-    await inputs[1].evaluate((el, val) => {
-      const fk = Object.keys(el).find((k) => k.startsWith('__reactFiber'));
-      const onChange = el[fk]?.memoizedProps?.onChange;
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      if (onChange) onChange({ target: el, currentTarget: el, type: 'change' });
-    }, amountStr);
-    await sleep(400);
+    // Enter the amount like a human (clear the field's default "1" first), then
+    // VERIFY the committed value. The old React-fiber hack didn't always commit,
+    // so a "100" could submit as the default 1.
+    const amountInput = inputs[1];
+    await amountInput.click({ clickCount: 3 });
+    await page.keyboard.press('Backspace');
+    await amountInput.type(amountStr, { delay: 70 });
+    await sleep(300);
+
+    let committed = ((await amountInput.evaluate((el) => el.value)) || '').replace(/,/g, '');
+    if (committed !== amountStr) {
+      // Fallback: native setter + real input/change events
+      await amountInput.evaluate((el, val) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(el, val);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }, amountStr);
+      await sleep(250);
+      committed = ((await amountInput.evaluate((el) => el.value)) || '').replace(/,/g, '');
+    }
+    console.log(`[Gamblit] amount field shows "${committed}" (want "${amountStr}")`);
+    if (committed !== amountStr) {
+      throw new Error(`Amount field shows "${committed}", expected "${amountStr}" — aborting before send`);
+    }
 
     const submitted = await page.evaluate(() => {
       const btn = [...document.querySelectorAll('button:not([disabled])')].find((b) => b.textContent.trim() === 'Send tip');
