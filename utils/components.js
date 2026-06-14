@@ -67,7 +67,7 @@ function buildOrderConfirmation({ orderId, bglAmount, usdAmount, ltcAmount, addr
       new SectionBuilder()
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
           `**Pay to this address:**\n\`\`\`\n${address}\n\`\`\`` +
-          `\n⚠️ Send the **exact** amount above — that's how we match your order. Scan the QR to auto-fill it.`
+          `\n⚠️ Send the **exact** amount (scan the QR to auto-fill). Sending **less** can't be auto-completed (manual refund); sending **more** is accepted but the extra isn't refunded.`
         ))
         .setThumbnailAccessory(new ThumbnailBuilder().setURL('attachment://qr.png').setDescription('Payment QR'))
     )
