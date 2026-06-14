@@ -40,8 +40,8 @@ const TX_GRACE_MS = 15 * 60 * 1000; // allow payments up to 15 min before order 
 // Assign a pool address not currently used by another active order (random).
 // Falls back to a reused address (unique amount still disambiguates).
 function pickAddress(pendingOrders) {
-  const pool = (storeState.getConfig().ltcAddresses || []).filter(Boolean);
-  const list = pool.length ? pool : [process.env.LTC_WALLET_ADDRESS].filter(Boolean);
+  const list = (process.env.LTC_WALLET_ADDRESSES || process.env.LTC_WALLET_ADDRESS || '')
+    .split(',').map((a) => a.trim()).filter(Boolean);
   if (!list.length) return null;
   const used = new Set(Object.values(pendingOrders).filter((o) => o.status === 'pending' || o.status === 'paid').map((o) => o.address));
   const free = list.filter((a) => !used.has(a));
@@ -71,11 +71,17 @@ async function processTipQueue() {
 }
 
 // ─── Buy / stock ──────────────────────────────────────────────────────────────
-async function handleBuyButton(interaction) { await interaction.showModal(buildBuyModal()); }
+async function handleBuyButton(interaction) {
+  if (!storeState.isShopOpen()) {
+    return interaction.reply({ content: '🔴 The shop is currently **closed**. Please check back later.', flags: MessageFlags.Ephemeral });
+  }
+  await interaction.showModal(buildBuyModal());
+}
 async function handleStockButton(interaction) { await interaction.reply(await buildStockInfo()); }
 
 async function handleBuyModalSubmit(interaction, client) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (!storeState.isShopOpen()) return interaction.editReply(buildOrderFailed({ reason: 'The shop is currently closed.' }));
   const gamblitUsername = interaction.fields.getTextInputValue('gamblit_username').trim();
   const usd = parseFloat(interaction.fields.getTextInputValue('usd_amount').trim());
 
