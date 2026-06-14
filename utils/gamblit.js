@@ -146,30 +146,32 @@ async function _tipFlow(growId, amountStr, label) {
     await inputs[0].click({ clickCount: 3 });
     await inputs[0].type(String(growId), { delay: 50 });
 
-    // The amount input is React-controlled AND readOnly, so keyboard typing and
-    // plain value-setting don't update the component's state — that's why a
-    // spoofed DOM "100" still submitted the default 1. Probe-confirmed fix: call
-    // the input's real React onChange prop, then verify against the REACT prop
-    // value (the DOM value can be set without updating state, so it lies).
+    // The amount field is a CurrencyInput that only COMMITS on blur (confirmed via
+    // probe — onChange alone left the modal's amount state at its default 1).
+    // Set value -> fire its real onChange -> fire its real onBlur, then verify
+    // against React state (digits only, since CurrencyInput may format the value).
     const amountInput = inputs[1];
     await amountInput.evaluate((el, val) => {
       const pk = Object.keys(el).find((k) => k.startsWith('__reactProps'));
       const props = pk ? el[pk] : null;
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
       setter.call(el, val);
-      if (props && typeof props.onChange === 'function') {
-        props.onChange({ target: el, currentTarget: el, type: 'change', bubbles: true, preventDefault() {}, stopPropagation() {} });
-      }
+      const ev = (type) => ({ target: el, currentTarget: el, type, bubbles: true, preventDefault() {}, stopPropagation() {} });
+      if (props && typeof props.onChange === 'function') props.onChange(ev('change'));
       el.dispatchEvent(new Event('input', { bubbles: true }));
+      if (props && typeof props.onBlur === 'function') props.onBlur(ev('blur'));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
     }, amountStr);
     await sleep(400);
 
-    const committed = ((await amountInput.evaluate((el) => {
+    const committed = await amountInput.evaluate((el) => {
       const pk = Object.keys(el).find((k) => k.startsWith('__reactProps'));
       return pk ? String(el[pk].value) : String(el.value);
-    })) || '').replace(/,/g, '');
+    });
+    const want = amountStr.replace(/\D/g, '');
+    const got = (committed || '').replace(/\D/g, '');
     console.log(`[Gamblit] amount React state = "${committed}" (want "${amountStr}")`);
-    if (committed !== amountStr) {
+    if (got !== want) {
       throw new Error(`Amount state is "${committed}", expected "${amountStr}" — aborting before send`);
     }
 
