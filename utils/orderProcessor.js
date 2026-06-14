@@ -35,6 +35,20 @@ function uniqueLtcAmount(baseLtc, pendingOrders) {
   return baseSat + Math.floor(Math.random() * 200000) + SPACING_SAT; // fallback
 }
 
+const TX_GRACE_MS = 15 * 60 * 1000; // allow payments up to 15 min before order creation
+
+// Assign a pool address not currently used by another active order (random).
+// Falls back to a reused address (unique amount still disambiguates).
+function pickAddress(pendingOrders) {
+  const pool = (storeState.getConfig().ltcAddresses || []).filter(Boolean);
+  const list = pool.length ? pool : [process.env.LTC_WALLET_ADDRESS].filter(Boolean);
+  if (!list.length) return null;
+  const used = new Set(Object.values(pendingOrders).filter((o) => o.status === 'pending' || o.status === 'paid').map((o) => o.address));
+  const free = list.filter((a) => !used.has(a));
+  const pickFrom = free.length ? free : list;
+  return pickFrom[Math.floor(Math.random() * pickFrom.length)];
+}
+
 // ─── Tip queue (one at a time, 16s gap) ───────────────────────────────────────
 let lastTipTime = 0, tipRunning = false;
 const tipQueue = [];
@@ -68,7 +82,7 @@ async function handleBuyModalSubmit(interaction, client) {
   if (isNaN(usd) || usd <= 0) return interaction.editReply(buildOrderFailed({ reason: 'Invalid USD amount. Enter a number like `5`.' }));
 
   try {
-    const address = process.env.LTC_WALLET_ADDRESS;
+    const address = pickAddress(storeState.get().pendingOrders);
     if (!address) return interaction.editReply(buildOrderFailed({ reason: 'Store wallet not configured. Contact support.' }));
 
     const rates = await ltcMonitor.getLtcUsdRate();
@@ -130,7 +144,12 @@ async function handleTxModalSubmit(interaction, client) {
   const order = storeState.getOrder(orderId);
   if (!order) return interaction.editReply(buildOrderFailed({ reason: 'Order not found or already completed.' }));
   if (order.userId !== interaction.user.id) return interaction.editReply(buildOrderFailed({ reason: 'This is not your order.' }));
-  if (order.status === 'delivering' || order.status === 'done') return interaction.editReply(buildOrderFailed({ orderId, reason: 'This order is already being processed.' }));
+  if (order.status !== 'pending') {
+    const msg = order.status === 'underpaid'
+      ? 'This order was underpaid and needs manual support — please contact us for a refund.'
+      : 'This order already has a payment recorded and is being processed.';
+    return interaction.editReply(buildOrderFailed({ orderId, reason: msg }));
+  }
   if (!/^[a-f0-9]{64}$/.test(txHash)) return interaction.editReply(buildOrderFailed({ orderId, reason: 'That doesn\'t look like a valid Litecoin TX hash (should be 64 hex characters).' }));
 
   // Reject a hash already linked elsewhere or already completed
@@ -142,8 +161,21 @@ async function handleTxModalSubmit(interaction, client) {
   if (!res.found) return interaction.editReply(buildOrderFailed({ orderId, reason: 'Transaction not found yet. Wait ~30s after sending, then try again.' }));
 
   const paidSat = Math.round(res.ltcAmount * 1e8);
-  if (Math.abs(paidSat - order.expectedSat) > TOL_SAT) {
-    return interaction.editReply(buildOrderFailed({ orderId, reason: `That TX paid **${res.ltcAmount} LTC** to the address, but this order expects **${order.ltcAmount} LTC**. Make sure you sent the exact amount.` }));
+  // Underpaid → reject (manual refund), release the stock hold. Exact/overpaid → accept.
+  if (paidSat < order.expectedSat - TOL_SAT) {
+    const shortLtc = ((order.expectedSat - paidSat) / 1e8).toFixed(8);
+    storeState.updateOrderField(orderId, 'depositTxHash', txHash);
+    storeState.updateOrderField(orderId, 'status', 'underpaid');
+    storeState.removeHold(order.heldAmount || 0);
+    storeState.updateOrderField(orderId, 'heldAmount', 0);
+    await refreshStoreMessage(client).catch(() => {});
+    await logToAdmin(client, { type: 'UNDERPAID', orderId, paid: res.ltcAmount, expected: order.ltcAmount, short: shortLtc, txHash });
+    return interaction.editReply(buildOrderFailed({ orderId, reason: `You sent **${res.ltcAmount} LTC**, but this order needs **${order.ltcAmount} LTC** — short by **${shortLtc} LTC**. Underpaid orders can't be auto-completed; please contact support for a refund of what you sent.` }));
+  }
+
+  // Reject payments made before this order existed (prevents claiming old transactions).
+  if (res.timeMs && res.timeMs < (order.createdAt || 0) - TX_GRACE_MS) {
+    return interaction.editReply(buildOrderFailed({ orderId, reason: 'That transaction was made before this order was created, so it can\'t be applied here. Please send a new payment for this order (or contact support if you believe this is a mistake).' }));
   }
 
   // Link the payment
@@ -153,6 +185,9 @@ async function handleTxModalSubmit(interaction, client) {
 
   await interaction.editReply(buildPaymentDetected({ orderId, ltcAmount: res.ltcAmount, gamblitUsername: order.gamblitUsername, confirmations: res.confirmations, target: DELIVERY_CONFIRMATIONS }));
   await logToAdmin(client, { type: 'PAYMENT_DETECTED', orderId, ltc: res.ltcAmount, confirmations: res.confirmations, via: 'tx-submit' });
+  if (paidSat > order.expectedSat + TOL_SAT) {
+    await logToAdmin(client, { type: 'OVERPAID', orderId, paid: res.ltcAmount, expected: order.ltcAmount, surplus: ((paidSat - order.expectedSat) / 1e8).toFixed(8) });
+  }
 
   // Deliver immediately if already confirmed enough
   if (res.confirmations >= DELIVERY_CONFIRMATIONS && !delivering.has(orderId)) {
@@ -210,28 +245,34 @@ async function pollOnce(client) {
 // Optional address-scan auto-detection. Enable with ADDRESS_AUTODETECT=true if you
 // also want payments matched without the buyer submitting a TX ID.
 async function autoDetect(client) {
-  const address = process.env.LTC_WALLET_ADDRESS;
   const state = storeState.get();
   const pending = Object.values(state.pendingOrders).filter((o) => o.status === 'pending' && !o.depositTxHash);
   if (pending.length === 0) return;
-  const txs = await ltcMonitor.getAddressIncomingTxs(address);
-  if (!txs.length) return;
   const assigned = new Set(Object.values(state.pendingOrders).filter((o) => o.depositTxHash).map((o) => o.depositTxHash));
-  for (const tx of txs) {
-    if (assigned.has(tx.txHash) || storeState.isTxProcessed(tx.txHash)) continue;
-    const match = pending.find((o) => !o.depositTxHash && Math.abs(o.expectedSat - tx.valueSat) <= TOL_SAT);
-    if (!match) continue;
-    assigned.add(tx.txHash);
-    match.depositTxHash = tx.txHash; match.status = 'paid';
-    storeState.updateOrderField(match.orderId, 'depositTxHash', tx.txHash);
-    storeState.updateOrderField(match.orderId, 'status', 'paid');
-    storeState.updateOrderField(match.orderId, 'notifiedDetected', true);
-    console.log(`[Poller] 🔍 Auto-matched ${match.orderId}: ${(tx.valueSat / 1e8).toFixed(8)} LTC (${tx.confirmations} conf)`);
-    try {
-      const user = await client.users.fetch(match.userId);
-      await user.send(buildPaymentDetected({ orderId: match.orderId, ltcAmount: (tx.valueSat / 1e8).toFixed(8), gamblitUsername: match.gamblitUsername, confirmations: tx.confirmations, target: DELIVERY_CONFIRMATIONS }));
-    } catch (_) {}
-    await logToAdmin(client, { type: 'PAYMENT_DETECTED', orderId: match.orderId, ltc: (tx.valueSat / 1e8).toFixed(8), confirmations: tx.confirmations, via: 'autodetect' });
+  const addresses = [...new Set(pending.map((o) => o.address).filter(Boolean))];
+
+  for (const address of addresses) {
+    const txs = await ltcMonitor.getAddressIncomingTxs(address);
+    for (const tx of txs) {
+      if (assigned.has(tx.txHash) || storeState.isTxProcessed(tx.txHash)) continue;
+      const match = pending.find((o) =>
+        o.address === address && !o.depositTxHash &&
+        Math.abs(o.expectedSat - tx.valueSat) <= TOL_SAT &&
+        (!tx.timeMs || tx.timeMs >= (o.createdAt || 0) - TX_GRACE_MS)
+      );
+      if (!match) continue;
+      assigned.add(tx.txHash);
+      match.depositTxHash = tx.txHash; match.status = 'paid';
+      storeState.updateOrderField(match.orderId, 'depositTxHash', tx.txHash);
+      storeState.updateOrderField(match.orderId, 'status', 'paid');
+      storeState.updateOrderField(match.orderId, 'notifiedDetected', true);
+      console.log(`[Poller] 🔍 Auto-matched ${match.orderId} on ${address}: ${(tx.valueSat / 1e8).toFixed(8)} LTC (${tx.confirmations} conf)`);
+      try {
+        const user = await client.users.fetch(match.userId);
+        await user.send(buildPaymentDetected({ orderId: match.orderId, ltcAmount: (tx.valueSat / 1e8).toFixed(8), gamblitUsername: match.gamblitUsername, confirmations: tx.confirmations, target: DELIVERY_CONFIRMATIONS }));
+      } catch (_) {}
+      await logToAdmin(client, { type: 'PAYMENT_DETECTED', orderId: match.orderId, ltc: (tx.valueSat / 1e8).toFixed(8), confirmations: tx.confirmations, via: 'autodetect' });
+    }
   }
 }
 
