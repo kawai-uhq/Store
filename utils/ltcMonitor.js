@@ -72,9 +72,10 @@ async function getAddressIncomingTxs(address) {
     for (const r of refs) {
       if (r.tx_input_n !== -1) continue; // only received outputs
       const h = r.tx_hash;
-      if (!byTx[h]) byTx[h] = { txHash: h, valueSat: 0, confirmations: r.confirmations || 0 };
+      if (!byTx[h]) byTx[h] = { txHash: h, valueSat: 0, confirmations: r.confirmations || 0, timeMs: r.confirmed ? Date.parse(r.confirmed) : Date.now() };
       byTx[h].valueSat += r.value || 0;
       byTx[h].confirmations = r.confirmations || 0;
+      if (r.confirmed) byTx[h].timeMs = Date.parse(r.confirmed);
     }
     return Object.values(byTx);
   } catch (e) {
@@ -90,7 +91,8 @@ async function lookupTx(txHash, walletAddress) {
     const tx = res.data;
     let sat = 0;
     for (const o of tx.outputs || []) if (o.addresses?.includes(walletAddress)) sat += o.value;
-    return { found: true, ltcAmount: sat / LTC_SATOSHI, confirmations: tx.confirmations || 0 };
+    const timeMs = tx.confirmed ? Date.parse(tx.confirmed) : (tx.received ? Date.parse(tx.received) : Date.now());
+    return { found: true, ltcAmount: sat / LTC_SATOSHI, confirmations: tx.confirmations || 0, timeMs };
   } catch (e) {
     if (e.response?.status === 404) return { found: false, error: 'Transaction not found' };
     return { found: false, error: e.message };
