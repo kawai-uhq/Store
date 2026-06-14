@@ -146,38 +146,45 @@ async function _tipFlow(growId, amountStr, label) {
     await inputs[0].click({ clickCount: 3 });
     await inputs[0].type(String(growId), { delay: 50 });
 
-    // Enter the amount like a human (clear the field's default "1" first), then
-    // VERIFY the committed value. The old React-fiber hack didn't always commit,
-    // so a "100" could submit as the default 1.
+    // The amount input is React-controlled AND readOnly, so keyboard typing and
+    // plain value-setting don't update the component's state — that's why a
+    // spoofed DOM "100" still submitted the default 1. Probe-confirmed fix: call
+    // the input's real React onChange prop, then verify against the REACT prop
+    // value (the DOM value can be set without updating state, so it lies).
     const amountInput = inputs[1];
-    await amountInput.click({ clickCount: 3 });
-    await page.keyboard.press('Backspace');
-    await amountInput.type(amountStr, { delay: 70 });
-    await sleep(300);
+    await amountInput.evaluate((el, val) => {
+      const pk = Object.keys(el).find((k) => k.startsWith('__reactProps'));
+      const props = pk ? el[pk] : null;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      if (props && typeof props.onChange === 'function') {
+        props.onChange({ target: el, currentTarget: el, type: 'change', bubbles: true, preventDefault() {}, stopPropagation() {} });
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }, amountStr);
+    await sleep(400);
 
-    let committed = ((await amountInput.evaluate((el) => el.value)) || '').replace(/,/g, '');
+    const committed = ((await amountInput.evaluate((el) => {
+      const pk = Object.keys(el).find((k) => k.startsWith('__reactProps'));
+      return pk ? String(el[pk].value) : String(el.value);
+    })) || '').replace(/,/g, '');
+    console.log(`[Gamblit] amount React state = "${committed}" (want "${amountStr}")`);
     if (committed !== amountStr) {
-      // Fallback: native setter + real input/change events
-      await amountInput.evaluate((el, val) => {
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        setter.call(el, val);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }, amountStr);
-      await sleep(250);
-      committed = ((await amountInput.evaluate((el) => el.value)) || '').replace(/,/g, '');
-    }
-    console.log(`[Gamblit] amount field shows "${committed}" (want "${amountStr}")`);
-    if (committed !== amountStr) {
-      throw new Error(`Amount field shows "${committed}", expected "${amountStr}" — aborting before send`);
+      throw new Error(`Amount state is "${committed}", expected "${amountStr}" — aborting before send`);
     }
 
-    const submitted = await page.evaluate(() => {
-      const btn = [...document.querySelectorAll('button:not([disabled])')].find((b) => b.textContent.trim() === 'Send tip');
-      if (btn) { btn.click(); return true; }
-      return false;
-    });
-    if (!submitted) { await page.mouse.click(640, 484); }
+    // Send tip is disabled until amount + username are valid — wait for it to enable
+    let submitted = false;
+    for (let i = 0; i < 8; i++) {
+      submitted = await page.evaluate(() => {
+        const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Send tip');
+        if (btn && !btn.disabled) { btn.click(); return true; }
+        return false;
+      });
+      if (submitted) break;
+      await sleep(400);
+    }
+    if (!submitted) throw new Error('Send tip stayed disabled — amount/username not accepted');
 
     await sleep(3000);
     const resultPath = `/tmp/gamblit_result_${Date.now()}.png`;
