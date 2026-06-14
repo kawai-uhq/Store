@@ -1,22 +1,23 @@
 // utils/storeState.js
-// In-memory + JSON-persisted store state
+// Runtime state (orders, holds, daily tips) persisted to data/store.json.
+// Editable SETTINGS (prices, stock, address pool, autoSyncStock) live in
+// config.json and are managed via utils/config.js — see get()/setPrice()/setStock().
 
 const fs = require('fs');
 const path = require('path');
+const config = require('./config');
 
 const DATA_FILE = path.join(__dirname, '../data/store.json');
 const DAILY_TIP_LIMIT = parseInt(process.env.TIP_DAILY_LIMIT) || 500;
 
 const DEFAULT_STATE = {
-  bglPriceEur: parseFloat(process.env.BGL_PRICE_EUR) || 1.25,
-  bglPriceUsd: parseFloat(process.env.BGL_PRICE_USD) || 1.35,
-  stockBgls: parseInt(process.env.STOCK_BGLS) || 1000,
   onHoldBgls: 0,
-  orders: {},         // txHash -> completed order
-  pendingOrders: {},  // orderId -> order awaiting payment/delivery
+  orders: {},
+  pendingOrders: {},
   seenTxHashes: {},
   dailyTipUsed: 0,
   dailyTipResetAt: null,
+  storeMessageId: null,
 };
 
 const round2 = (n) => Math.floor(n * 100) / 100;
@@ -24,12 +25,12 @@ const round2 = (n) => Math.floor(n * 100) / 100;
 function load() {
   try {
     if (fs.existsSync(DATA_FILE)) {
-      const raw = fs.readFileSync(DATA_FILE, 'utf8');
-      return { ...DEFAULT_STATE, ...JSON.parse(raw) };
+      const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+      // settings moved to config.json — strip any legacy copies
+      delete raw.bglPriceEur; delete raw.bglPriceUsd; delete raw.stockBgls;
+      return { ...DEFAULT_STATE, ...raw };
     }
-  } catch (e) {
-    console.error('[StoreState] Failed to load state:', e.message);
-  }
+  } catch (e) { console.error('[StoreState] load failed:', e.message); }
   return { ...DEFAULT_STATE };
 }
 
@@ -37,52 +38,32 @@ function save(state) {
   try {
     fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
     fs.writeFileSync(DATA_FILE, JSON.stringify(state, null, 2));
-  } catch (e) {
-    console.error('[StoreState] Failed to save state:', e.message);
-  }
+  } catch (e) { console.error('[StoreState] save failed:', e.message); }
 }
 
 let state = load();
 
 module.exports = {
-  get() { return state; },
-
-  setPrice(eur, usd) {
-    state.bglPriceEur = parseFloat(eur);
-    state.bglPriceUsd = parseFloat(usd);
-    save(state);
+  // Returns runtime state merged with current settings from config.json.
+  get() {
+    const c = config.get();
+    return { ...state, bglPriceEur: c.bglPriceEur, bglPriceUsd: c.bglPriceUsd, stockBgls: c.stockBgls };
   },
+  getConfig() { return config.get(); },
 
-  setStock(amount) {
-    state.stockBgls = round2(parseFloat(amount));
-    save(state);
-  },
-
-  getAvailableStock() {
-    return Math.max(0, round2(state.stockBgls - state.onHoldBgls));
-  },
+  setPrice(eur, usd) { config.set({ bglPriceEur: parseFloat(eur), bglPriceUsd: parseFloat(usd) }); },
+  setStock(amount) { config.set({ stockBgls: round2(parseFloat(amount)) }); },
+  consumeStock(bgls) { const c = config.get(); config.set({ stockBgls: Math.max(0, round2(c.stockBgls - bgls)) }); },
+  getAvailableStock() { return Math.max(0, round2(config.get().stockBgls - state.onHoldBgls)); },
 
   addHold(bgls) { state.onHoldBgls = round2(state.onHoldBgls + bgls); save(state); },
-
   removeHold(bgls) { state.onHoldBgls = Math.max(0, round2(state.onHoldBgls - bgls)); save(state); },
 
-  // Decrement total stock only (hold is managed separately in the new flow).
-  consumeStock(bgls) { state.stockBgls = Math.max(0, round2(state.stockBgls - bgls)); save(state); },
-
-  addOrder(orderId, order) {
-    state.pendingOrders[orderId] = { ...order, createdAt: Date.now() };
-    save(state);
-  },
-
+  addOrder(orderId, order) { state.pendingOrders[orderId] = { ...order, createdAt: Date.now() }; save(state); },
   getOrder(orderId) { return state.pendingOrders[orderId] || null; },
-
   updateOrderField(orderId, field, value) {
-    if (state.pendingOrders[orderId]) {
-      state.pendingOrders[orderId][field] = value;
-      save(state);
-    }
+    if (state.pendingOrders[orderId]) { state.pendingOrders[orderId][field] = value; save(state); }
   },
-
   completeOrder(orderId, txHash) {
     const order = state.pendingOrders[orderId];
     if (order) {
@@ -92,7 +73,6 @@ module.exports = {
     }
     return order;
   },
-
   cancelOrder(orderId) {
     const order = state.pendingOrders[orderId];
     if (order) {
@@ -102,7 +82,6 @@ module.exports = {
     }
     return order;
   },
-
   isTxProcessed(txHash) { return !!state.orders[txHash]; },
 
   checkTipLimit(amount) {
@@ -120,26 +99,20 @@ module.exports = {
       resetsAt: state.dailyTipResetAt,
     };
   },
-
   addTipUsed(amount) { state.dailyTipUsed += amount; save(state); },
 
   markTxSeen(txHash, tag = '') {
-    const key = txHash + tag;
     if (!state.seenTxHashes) state.seenTxHashes = {};
-    state.seenTxHashes[key] = Date.now();
+    state.seenTxHashes[txHash + tag] = Date.now();
     save(state);
   },
-
   isTxSeen(txHash, tag = '') { return !!(state.seenTxHashes?.[txHash + tag]); },
-
   cleanSeenHashes() {
     if (!state.seenTxHashes) return;
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    for (const [k, v] of Object.entries(state.seenTxHashes)) {
-      if (v < cutoff) delete state.seenTxHashes[k];
-    }
+    for (const [k, v] of Object.entries(state.seenTxHashes)) if (v < cutoff) delete state.seenTxHashes[k];
     save(state);
   },
 
-  setStoreMessageId(messageId) { state.storeMessageId = messageId; save(state); },
+  setStoreMessageId(id) { state.storeMessageId = id; save(state); },
 };
