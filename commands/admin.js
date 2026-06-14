@@ -19,6 +19,9 @@ const ADMIN_COMMANDS = [
     .addStringOption((o) => o.setName('orderid').setDescription('Order ID').setRequired(true)),
   new SlashCommandBuilder().setName('refreshstore').setDescription('Re-edit the store embed in place'),
   new SlashCommandBuilder().setName('storestats').setDescription('View store statistics'),
+  new SlashCommandBuilder().setName('shop').setDescription('Open or close the shop')
+    .addStringOption((o) => o.setName('state').setDescription('open or closed').setRequired(true)
+      .addChoices({ name: 'open', value: 'open' }, { name: 'closed', value: 'closed' })),
   new SlashCommandBuilder().setName('screenshot').setDescription('Screenshot what Puppeteer sees on Gamblit')
     .addStringOption((o) => o.setName('url').setDescription('URL (default gamblit.net)').setRequired(false)),
   new SlashCommandBuilder().setName('balance').setDescription('Fetch Gamblit balance and sync stock'),
@@ -148,11 +151,22 @@ async function handleAdminCommand(interaction, client) {
     }
   }
 
+  if (cmd === 'shop') {
+    const st = interaction.options.getString('state');
+    storeState.setShopOpen(st === 'open');
+    await refreshStoreMessage(client);
+    return interaction.reply({
+      content: st === 'open' ? '🟢 Shop is now **OPEN** — buyers can purchase.' : '🔴 Shop is now **CLOSED** — the Buy button is disabled and purchases are blocked.',
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
   if (cmd === 'storestats') {
     const state = storeState.get();
     return interaction.reply({
       content:
         `📊 **Store Statistics**\n` +
+        `Shop: ${storeState.isShopOpen() ? '🟢 OPEN' : '🔴 CLOSED'}\n` +
         `Stock: ${state.stockBgls.toLocaleString()} BGLs\n` +
         `On Hold: ${state.onHoldBgls.toLocaleString()} BGLs\n` +
         `Available: ${storeState.getAvailableStock().toLocaleString()} BGLs\n` +
