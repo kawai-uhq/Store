@@ -2,14 +2,15 @@
 
 const { SlashCommandBuilder, MessageFlags, ChannelType } = require('discord.js');
 const storeState = require('../utils/storeState');
+const ltcMonitor = require('../utils/ltcMonitor');
 const { buildStoreMessage } = require('../utils/components');
 
 const ADMIN_COMMANDS = [
   new SlashCommandBuilder().setName('sendembed').setDescription('Send the store embed to a channel (or current channel)')
     .addChannelOption((o) => o.setName('channel').setDescription('Target channel').addChannelTypes(ChannelType.GuildText).setRequired(false)),
-  new SlashCommandBuilder().setName('setprice').setDescription('Set the BGL price')
-    .addNumberOption((o) => o.setName('eur').setDescription('Price in EUR per BGL').setRequired(true).setMinValue(0.01))
-    .addNumberOption((o) => o.setName('usd').setDescription('Price in USD per BGL').setRequired(true).setMinValue(0.01)),
+  new SlashCommandBuilder().setName('setprice').setDescription('Set the BGL price (provide one currency, the other is auto-calculated)')
+    .addNumberOption((o) => o.setName('eur').setDescription('Price in EUR per BGL').setRequired(false).setMinValue(0.01))
+    .addNumberOption((o) => o.setName('usd').setDescription('Price in USD per BGL').setRequired(false).setMinValue(0.01)),
   new SlashCommandBuilder().setName('setstock').setDescription('Set the available BGL stock')
     .addIntegerOption((o) => o.setName('amount').setDescription('Number of BGLs').setRequired(true).setMinValue(0)),
   new SlashCommandBuilder().setName('addstock').setDescription('Add BGLs to current stock')
@@ -56,11 +57,27 @@ async function handleAdminCommand(interaction, client) {
   }
 
   if (cmd === 'setprice') {
-    const eur = interaction.options.getNumber('eur');
-    const usd = interaction.options.getNumber('usd');
+    let eur = interaction.options.getNumber('eur');
+    let usd = interaction.options.getNumber('usd');
+    if (eur == null && usd == null) {
+      return interaction.reply({ content: '❌ Provide at least one of `eur` or `usd` — the other is auto-calculated.', flags: MessageFlags.Ephemeral });
+    }
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    let note = '';
+    if (eur == null || usd == null) {
+      const rates = await ltcMonitor.getLtcUsdRate(); // LTC priced in both USD & EUR → exact USD/EUR ratio
+      if (!rates?.usd || !rates?.eur) {
+        return interaction.editReply({ content: '❌ Couldn\'t fetch fiat rates right now. Try again, or pass both `eur` and `usd`.' });
+      }
+      const eurPerUsd = rates.eur / rates.usd;
+      if (eur == null) { eur = Math.round(usd * eurPerUsd * 100) / 100; note = `\n-# EUR auto-calculated at €${eurPerUsd.toFixed(4)} per $1`; }
+      else { usd = Math.round((eur / eurPerUsd) * 100) / 100; note = `\n-# USD auto-calculated at €${eurPerUsd.toFixed(4)} per $1`; }
+    }
+
     storeState.setPrice(eur, usd);
     await refreshStoreMessage(client);
-    return interaction.reply({ content: `✅ Price: **€${eur.toFixed(2)}** / **$${usd.toFixed(2)}** per BGL`, flags: MessageFlags.Ephemeral });
+    return interaction.editReply({ content: `✅ Price set: **€${eur.toFixed(2)}** / **$${usd.toFixed(2)}** per BGL${note}` });
   }
 
   if (cmd === 'setstock') {
