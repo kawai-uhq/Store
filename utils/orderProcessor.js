@@ -3,8 +3,9 @@
 //   address -> show address + QR -> poll that address, match payment BY AMOUNT
 //   -> deliver BGLs at DELIVERY_CONFIRMATIONS.
 
-const { MessageFlags } = require('discord.js');
+const { MessageFlags, AttachmentBuilder } = require('discord.js');
 const crypto = require('crypto');
+const fs = require('fs');
 
 const storeState = require('./storeState');
 const ltcMonitor = require('./ltcMonitor');
@@ -167,17 +168,21 @@ async function handleTxModalSubmit(interaction, client) {
   if (!res.found) return interaction.editReply(buildOrderFailed({ orderId, reason: 'Transaction not found yet. Wait ~30s after sending, then try again.' }));
 
   const paidSat = Math.round(res.ltcAmount * 1e8);
-  // Underpaid → reject (manual refund), release the stock hold. Exact/overpaid → accept.
-  if (paidSat < order.expectedSat - TOL_SAT) {
-    const shortLtc = ((order.expectedSat - paidSat) / 1e8).toFixed(8);
+  // Proportional both ways: deliver BGLs worth exactly what was paid.
+  let deliverBgl = order.bglAmount;
+  if (Math.abs(paidSat - order.expectedSat) > TOL_SAT) {
+    deliverBgl = Math.floor((order.bglAmount * (paidSat / order.expectedSat)) * 100) / 100;
+  }
+  if (deliverBgl <= 0) {
     storeState.updateOrderField(orderId, 'depositTxHash', txHash);
     storeState.updateOrderField(orderId, 'status', 'underpaid');
     storeState.removeHold(order.heldAmount || 0);
     storeState.updateOrderField(orderId, 'heldAmount', 0);
     await refreshStoreMessage(client).catch(() => {});
-    await logToAdmin(client, { type: 'UNDERPAID', orderId, paid: res.ltcAmount, expected: order.ltcAmount, short: shortLtc, txHash });
-    return interaction.editReply(buildOrderFailed({ orderId, reason: `You sent **${res.ltcAmount} LTC**, but this order needs **${order.ltcAmount} LTC** — short by **${shortLtc} LTC**. Underpaid orders can't be auto-completed; please contact support for a refund of what you sent.` }));
+    await logToAdmin(client, { type: 'UNDERPAID', orderId, paid: res.ltcAmount, expected: order.ltcAmount, note: 'too small to tip' });
+    return interaction.editReply(buildOrderFailed({ orderId, reason: `You sent **${res.ltcAmount} LTC**, which is too small to deliver any BGLs. Please contact support for a refund.` }));
   }
+  storeState.updateOrderField(orderId, 'deliverBgl', deliverBgl);
 
   // Reject payments made before this order existed (prevents claiming old transactions).
   if (res.timeMs && res.timeMs < (order.createdAt || 0) - TX_GRACE_MS) {
@@ -286,15 +291,20 @@ async function deliverOrder(order, tx, client) {
   const fresh = storeState.getOrder(order.orderId);
   if (!fresh || fresh.status === 'done') return;
   try {
-    const bgl = fresh.bglAmount;
+    const requested = fresh.deliverBgl || fresh.bglAmount;
+    const capacity = storeState.getAvailableStock() + (fresh.heldAmount || 0);
+    let bgl = requested;
+    let capped = false;
+    if (bgl > capacity) { bgl = Math.floor(capacity * 100) / 100; capped = true; }
+    if (bgl <= 0) throw new Error('No stock available to deliver');
+    const proportional = requested !== fresh.bglAmount;
+
     const lim = storeState.checkTipLimit(bgl);
     if (!lim.canTip) throw new Error(`Daily tip limit reached (${lim.used}/${lim.limit} BGL).`);
-    const capacity = storeState.getAvailableStock() + (fresh.heldAmount || 0);
-    if (bgl > capacity) throw new Error(`Insufficient stock for ${bgl} BGLs (capacity ${capacity}).`);
 
     storeState.updateOrderField(order.orderId, 'status', 'delivering');
-    console.log(`[Poller] ✅ Delivering ${bgl} BGLs to ${order.gamblitUsername} (${order.orderId})`);
-    await enqueueTip(() => gamblit.tipUser(order.gamblitUsername, bgl));
+    console.log(`[Poller] ✅ Delivering ${bgl} BGLs${proportional ? ' (proportional)' : ''}${capped ? ' (capped at stock)' : ''} to ${order.gamblitUsername} (${order.orderId})`);
+    const tipResult = await enqueueTip(() => gamblit.tipUser(order.gamblitUsername, bgl));
 
     storeState.removeHold(fresh.heldAmount || 0);
     storeState.consumeStock(bgl);
@@ -306,7 +316,12 @@ async function deliverOrder(order, tx, client) {
       await user.send(buildOrderCompleted({ orderId: order.orderId, bglAmount: bgl, gamblitUsername: order.gamblitUsername, txHash: tx.txHash }));
     } catch (_) {}
     await refreshStoreMessage(client).catch(() => {});
-    await logToAdmin(client, { type: 'ORDER_COMPLETED', orderId: order.orderId, bglAmount: bgl, gamblitUsername: order.gamblitUsername, txHash: tx.txHash });
+
+    const logData = { type: 'ORDER_COMPLETED', orderId: order.orderId, bglAmount: bgl, gamblitUsername: order.gamblitUsername, txHash: tx.txHash };
+    if (proportional) logData.ordered = fresh.bglAmount;
+    if (capped) logData.note = `CAPPED at stock — buyer paid for ${requested} BGLs; ${Math.floor((requested - bgl) * 100) / 100} owed (manual top-up/refund)`;
+    else if (proportional) logData.note = 'proportional';
+    await logToAdmin(client, logData, tipResult?.screenshot);
   } catch (e) {
     console.error(`[Poller] Delivery failed for ${order.orderId}:`, e.message);
     storeState.updateOrderField(order.orderId, 'status', 'failed');
@@ -332,7 +347,7 @@ async function cleanupExpiredOrders(client) {
   return cleaned;
 }
 
-async function logToAdmin(client, data) {
+async function logToAdmin(client, data, screenshotPath) {
   const channelId = process.env.LOG_CHANNEL_ID;
   if (!channelId) return;
   try {
@@ -342,7 +357,11 @@ async function logToAdmin(client, data) {
     let content = `${emojis[data.type] || '📌'} **${data.type}**\n`;
     for (const [k, v] of Object.entries(data)) if (k !== 'type') content += `\`${k}\`: ${v}\n`;
     content += `-# <t:${Math.floor(Date.now() / 1000)}:F>`;
-    await channel.send({ content });
+    const files = [];
+    if (screenshotPath && fs.existsSync(screenshotPath)) {
+      files.push(new AttachmentBuilder(fs.readFileSync(screenshotPath), { name: 'tip.png' }));
+    }
+    await channel.send({ content, files });
   } catch (e) { console.error('[OrderProcessor] Admin log failed:', e.message); }
 }
 
