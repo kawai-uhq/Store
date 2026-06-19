@@ -12,6 +12,16 @@ const { getLtcUsdRate } = require('./ltcMonitor');
 const CV2_FLAG = MessageFlags.IsComponentsV2;
 const sep = () => new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true);
 
+// Custom server emojis
+const EMOJI = {
+  online: '<a:greendot:1517564079911207025>',
+  offline: '<a:reddot:1517564147443695776>',
+  stock: '<a:shinybgl:1517563679833325609>',
+  ltc: '<:ltc:1517563317525156050>',
+  rate: '<:exchange:1517566474762453022>',
+  gamblit: '<:gamblit:1517563383086321805>',
+};
+
 // ─── MAIN STORE EMBED ─────────────────────────────────────────────────────────
 async function buildStoreMessage() {
   const state = storeState.get();
@@ -19,7 +29,7 @@ async function buildStoreMessage() {
   const open = storeState.isShopOpen();
   const rates = await getLtcUsdRate().catch(() => ({ usd: '?', eur: '?' }));
   const canBuy = open && available > 0;
-  const statusEmoji = !open ? '🔴' : (available > 0 ? '🟢' : '🔴');
+  const statusEmoji = !open ? EMOJI.offline : (available > 0 ? EMOJI.online : EMOJI.offline);
   const statusText = !open ? 'CLOSED' : (available > 0 ? 'OPEN' : 'OUT OF STOCK');
   const usdStr = typeof rates.usd === 'number' ? rates.usd.toFixed(2) : rates.usd;
   const holdLine = state.onHoldBgls > 0 ? `\n⏳ **On Hold:** ${state.onHoldBgls.toLocaleString()} BGLs` : '';
@@ -31,18 +41,18 @@ async function buildStoreMessage() {
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(
       `**How it works:**\n` +
       `1. Press 🛒 **Buy**\n` +
-      `2. Enter your Gamblit username + amount in **USD**\n` +
+      `2. Enter your ${EMOJI.gamblit} Gamblit username + amount in **USD**\n` +
       `3. You'll get a **payment address + QR** with the exact LTC amount\n` +
       `4. Pay it — BGLs arrive automatically after confirmation`
     ))
     .addSeparatorComponents(sep())
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(
       `${statusEmoji} **Status:** ${statusText}\n` +
-      `💵 **Rate:** €${state.bglPriceEur.toFixed(2)} / $${state.bglPriceUsd.toFixed(2)} per BGL\n` +
-      `📦 **Available Stock:** ${available % 1 === 0 ? available.toLocaleString() : available.toFixed(2)} BGLs` + holdLine
+      `${EMOJI.rate} **Rate:** €${state.bglPriceEur.toFixed(2)} / $${state.bglPriceUsd.toFixed(2)} per BGL\n` +
+      `${EMOJI.stock} **Available Stock:** ${available % 1 === 0 ? available.toLocaleString() : available.toFixed(2)} BGLs` + holdLine
     ))
     .addSeparatorComponents(sep())
-    .addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# 💎 LTC: $${usdStr} — updates every 15 min`));
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${EMOJI.ltc} LTC: $${usdStr} — updates every 15 min`));
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('store_buy').setLabel('Buy').setEmoji('🛒').setStyle(ButtonStyle.Success).setDisabled(!canBuy),
@@ -60,9 +70,9 @@ function buildOrderConfirmation({ orderId, bglAmount, usdAmount, ltcAmount, addr
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ⏳ Order Created — Send Your Payment\n-# Order ID: \`${orderId}\``))
     .addSeparatorComponents(sep())
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-      `🎮 **BGLs:** ${bglAmount}\n` +
+      `${EMOJI.stock} **BGLs:** ${bglAmount}\n` +
       `💵 **USD:** $${usdAmount}\n` +
-      `💎 **Send EXACTLY:** \`${ltcAmount}\` LTC`
+      `${EMOJI.ltc} **Send EXACTLY:** \`${ltcAmount}\` LTC`
     ))
     .addSeparatorComponents(sep())
     // Address on the left, QR on the right (Section + Thumbnail accessory)
@@ -96,6 +106,20 @@ function buildCopyReply({ address, ltcAmount }) {
   };
 }
 
+// ─── PAYMENT RECEIVED (submission acknowledgment, pre-confirmation) ────────────
+function buildPaymentReceived({ orderId, ltcAmount, confirmations, notify, target }) {
+  const container = new ContainerBuilder()
+    .setAccentColor(0xfbc02d)
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ⏳ Payment Received — Tracking\nWe found your transaction and are watching it confirm.`))
+    .addSeparatorComponents(sep())
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+      `${EMOJI.ltc} **Received:** ${ltcAmount} LTC\n` +
+      `-# Confirmations: ${confirmations}/${target ?? 2}\n` +
+      `-# You'll be notified at ${notify ?? 1} confirmation; BGLs send at ${target ?? 2}.\n-# Order ID: \`${orderId}\``
+    ));
+  return { components: [container], flags: CV2_FLAG };
+}
+
 // ─── PAYMENT DETECTED ─────────────────────────────────────────────────────────
 function buildPaymentDetected({ orderId, ltcAmount, gamblitUsername, confirmations, target }) {
   const container = new ContainerBuilder()
@@ -103,8 +127,8 @@ function buildPaymentDetected({ orderId, ltcAmount, gamblitUsername, confirmatio
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## 🔍 Payment Detected — Confirming...\nFound your payment. BGLs send automatically once confirmed.`))
     .addSeparatorComponents(sep())
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-      `💎 **Received:** ${ltcAmount} LTC\n🎮 **Gamblit User:** ${gamblitUsername}\n` +
-      `-# Confirmations: ${confirmations}/${target ?? 6}\n-# Order ID: \`${orderId}\``
+      `${EMOJI.ltc} **Received:** ${ltcAmount} LTC\n${EMOJI.gamblit} **Gamblit User:** ${gamblitUsername}\n` +
+      `-# Confirmations: ${confirmations}/${target ?? 2}\n-# Order ID: \`${orderId}\``
     ));
   return { components: [container], flags: CV2_FLAG };
 }
@@ -116,7 +140,7 @@ function buildOrderCompleted({ orderId, bglAmount, gamblitUsername, txHash }) {
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ✅ Order Completed!\nYour BGLs have been sent to your Gamblit account.`))
     .addSeparatorComponents(sep())
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-      `🎮 **Gamblit:** ${gamblitUsername}\n📦 **BGLs Sent:** ${bglAmount.toLocaleString()}\n` +
+      `${EMOJI.gamblit} **Gamblit:** ${gamblitUsername}\n${EMOJI.stock} **BGLs Sent:** ${bglAmount.toLocaleString()}\n` +
       (txHash ? `-# TX: \`${txHash.slice(0, 24)}...\`\n` : '') + `-# Order ID: \`${orderId}\``
     ));
   return { components: [container], flags: CV2_FLAG };
@@ -154,5 +178,5 @@ async function buildStockInfo() {
 
 module.exports = {
   buildStoreMessage, buildOrderConfirmation, buildCopyReply,
-  buildOrderCompleted, buildOrderFailed, buildPaymentDetected, buildStockInfo,
+  buildOrderCompleted, buildOrderFailed, buildPaymentDetected, buildPaymentReceived, buildStockInfo,
 };
