@@ -13,15 +13,20 @@ const gamblit = require('./gamblit');
 const { bip21, makeQrBuffer } = require('./qr');
 const {
   buildOrderConfirmation, buildCopyReply, buildOrderCompleted,
-  buildOrderFailed, buildPaymentDetected, buildStockInfo,
+  buildOrderFailed, buildPaymentDetected, buildPaymentReceived, buildStockInfo,
 } = require('./components');
 const { buildBuyModal, buildTxModal } = require('./orderModal');
 const { refreshStoreMessage } = require('../commands/admin');
 
-const DELIVERY_CONFIRMATIONS = parseInt(process.env.DELIVERY_CONFIRMATIONS) || 6;
+const NOTIFY_CONFIRMATIONS = parseInt(process.env.NOTIFY_CONFIRMATIONS) || 1;   // DM "payment detected" at this many confs
+const DELIVERY_CONFIRMATIONS = parseInt(process.env.DELIVERY_CONFIRMATIONS) || 2; // tip at this many confs
 const ORDER_TTL_MS = 60 * 60 * 1000;
 const TOL_SAT = 800;       // amount-match tolerance
 const SPACING_SAT = 2000;  // gap between unique amounts (> 2*TOL_SAT)
+
+// Vouch request (sent in DM after delivery)
+const VOUCH_URL = process.env.VOUCH_CHANNEL_URL || 'https://discord.com/channels/1514248323983474849/1517560644554199122';
+const VOUCH_TARGET = process.env.VOUCH_TARGET_ID || '1445760217986895963';
 
 const generateOrderId = () => 'ORD-' + crypto.randomBytes(4).toString('hex').toUpperCase();
 
@@ -192,18 +197,37 @@ async function handleTxModalSubmit(interaction, client) {
   // Link the payment
   storeState.updateOrderField(orderId, 'depositTxHash', txHash);
   storeState.updateOrderField(orderId, 'status', 'paid');
-  storeState.updateOrderField(orderId, 'notifiedDetected', true);
+  storeState.updateOrderField(orderId, 'notifiedDetected', false);
 
-  await interaction.editReply(buildPaymentDetected({ orderId, ltcAmount: res.ltcAmount, gamblitUsername: order.gamblitUsername, confirmations: res.confirmations, target: DELIVERY_CONFIRMATIONS }));
-  await logToAdmin(client, { type: 'PAYMENT_DETECTED', orderId, ltc: res.ltcAmount, confirmations: res.confirmations, via: 'tx-submit' });
   if (paidSat > order.expectedSat + TOL_SAT) {
     await logToAdmin(client, { type: 'OVERPAID', orderId, paid: res.ltcAmount, expected: order.ltcAmount, surplus: ((paidSat - order.expectedSat) / 1e8).toFixed(8) });
   }
 
-  // Deliver immediately if already confirmed enough
-  if (res.confirmations >= DELIVERY_CONFIRMATIONS && !delivering.has(orderId)) {
-    delivering.add(orderId);
-    deliverOrder(storeState.getOrder(orderId), { txHash, confirmations: res.confirmations, valueSat: paidSat }, client).finally(() => delivering.delete(orderId));
+  // Acknowledge submission; notification (1 conf) and delivery (2 conf) proceed by confirmations.
+  await interaction.editReply(buildPaymentReceived({ orderId, ltcAmount: res.ltcAmount, confirmations: res.confirmations, notify: NOTIFY_CONFIRMATIONS, target: DELIVERY_CONFIRMATIONS }));
+  await logToAdmin(client, { type: 'PAYMENT_SUBMITTED', orderId, ltc: res.ltcAmount, confirmations: res.confirmations, via: 'tx-submit' });
+
+  await progressOrder(storeState.getOrder(orderId), res, client);
+}
+
+// Shared confirmation handler: notify at NOTIFY_CONFIRMATIONS, deliver at DELIVERY_CONFIRMATIONS.
+async function progressOrder(o, res, client) {
+  if (!o || delivering.has(o.orderId) || o.status === 'done' || o.status === 'delivering') return;
+  const conf = res.confirmations || 0;
+
+  if (conf >= NOTIFY_CONFIRMATIONS && !o.notifiedDetected) {
+    storeState.updateOrderField(o.orderId, 'notifiedDetected', true);
+    try {
+      const user = await client.users.fetch(o.userId);
+      await user.send(buildPaymentDetected({ orderId: o.orderId, ltcAmount: res.ltcAmount, gamblitUsername: o.gamblitUsername, confirmations: conf, target: DELIVERY_CONFIRMATIONS }));
+    } catch (_) {}
+    await logToAdmin(client, { type: 'PAYMENT_DETECTED', orderId: o.orderId, ltc: res.ltcAmount, confirmations: conf });
+  }
+
+  if (conf >= DELIVERY_CONFIRMATIONS) {
+    delivering.add(o.orderId);
+    deliverOrder(storeState.getOrder(o.orderId), { txHash: o.depositTxHash, confirmations: conf, valueSat: Math.round(res.ltcAmount * 1e8) }, client)
+      .finally(() => delivering.delete(o.orderId));
   }
 }
 
@@ -225,7 +249,7 @@ function startOrderPoller(client, intervalMs = 60_000) {
   if (pollTimer) clearInterval(pollTimer);
   storeState.cleanSeenHashes();
   const mode = process.env.ADDRESS_AUTODETECT === 'true' ? 'submitted TX IDs + address autodetect' : 'submitted TX IDs only';
-  console.log(`[Poller] Confirmation watcher running (${mode}, deliver at ${DELIVERY_CONFIRMATIONS} confs)`);
+  console.log(`[Poller] Confirmation watcher running (${mode}, notify at ${NOTIFY_CONFIRMATIONS} conf, deliver at ${DELIVERY_CONFIRMATIONS} conf)`);
   const tick = () => pollOnce(client).catch((e) => console.error('[Poller] tick error:', e.message));
   tick();
   pollTimer = setInterval(tick, intervalMs);
@@ -245,11 +269,7 @@ async function pollOnce(client) {
     if (delivering.has(o.orderId)) continue;
     const res = await ltcMonitor.lookupTx(o.depositTxHash, o.address);
     if (!res.found) continue;
-    if (res.confirmations >= DELIVERY_CONFIRMATIONS) {
-      delivering.add(o.orderId);
-      deliverOrder(o, { txHash: o.depositTxHash, confirmations: res.confirmations, valueSat: Math.round(res.ltcAmount * 1e8) }, client)
-        .finally(() => delivering.delete(o.orderId));
-    }
+    await progressOrder(o, res, client);
   }
 }
 
@@ -276,13 +296,9 @@ async function autoDetect(client) {
       match.depositTxHash = tx.txHash; match.status = 'paid';
       storeState.updateOrderField(match.orderId, 'depositTxHash', tx.txHash);
       storeState.updateOrderField(match.orderId, 'status', 'paid');
-      storeState.updateOrderField(match.orderId, 'notifiedDetected', true);
+      storeState.updateOrderField(match.orderId, 'notifiedDetected', false);
       console.log(`[Poller] 🔍 Auto-matched ${match.orderId} on ${address}: ${(tx.valueSat / 1e8).toFixed(8)} LTC (${tx.confirmations} conf)`);
-      try {
-        const user = await client.users.fetch(match.userId);
-        await user.send(buildPaymentDetected({ orderId: match.orderId, ltcAmount: (tx.valueSat / 1e8).toFixed(8), gamblitUsername: match.gamblitUsername, confirmations: tx.confirmations, target: DELIVERY_CONFIRMATIONS }));
-      } catch (_) {}
-      await logToAdmin(client, { type: 'PAYMENT_DETECTED', orderId: match.orderId, ltc: (tx.valueSat / 1e8).toFixed(8), confirmations: tx.confirmations, via: 'autodetect' });
+      await progressOrder(storeState.getOrder(match.orderId), { confirmations: tx.confirmations, ltcAmount: tx.valueSat / 1e8 }, client);
     }
   }
 }
@@ -314,6 +330,10 @@ async function deliverOrder(order, tx, client) {
     try {
       const user = await client.users.fetch(order.userId);
       await user.send(buildOrderCompleted({ orderId: order.orderId, bglAmount: bgl, gamblitUsername: order.gamblitUsername, txHash: tx.txHash }));
+      // Vouch request
+      const eurTotal = (bgl * storeState.get().bglPriceEur).toFixed(2);
+      await user.send({ content: `Please leave a vouch at ${VOUCH_URL}`, allowedMentions: { parse: [] } });
+      await user.send({ content: `\`\`\`\n+rep <@${VOUCH_TARGET}> ${bgl} BGLs for €${eurTotal} LTC via gamblit tipping through autostore\n\`\`\``, allowedMentions: { parse: [] } });
     } catch (_) {}
     await refreshStoreMessage(client).catch(() => {});
 
