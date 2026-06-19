@@ -31,6 +31,10 @@ const ADMIN_COMMANDS = [
     .addNumberOption((o) => o.setName('amount').setDescription('Raw amount to type into the tip field (e.g. WL)').setRequired(true).setMinValue(0.0001)),
 ];
 
+// Hide every command from non-admins at the Discord level (0 = admin-only).
+// Admins can still grant specific roles access via Server Settings → Integrations.
+ADMIN_COMMANDS.forEach((c) => c.setDefaultMemberPermissions(0));
+
 function isAdmin(interaction) {
   const adminRoleId = process.env.ADMIN_ROLE_ID;
   if (!adminRoleId) return interaction.member?.permissions?.has('Administrator');
